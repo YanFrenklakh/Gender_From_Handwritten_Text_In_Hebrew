@@ -1,5 +1,4 @@
 import os
-import io
 import re
 import pandas as pd
 import numpy as np
@@ -11,12 +10,10 @@ from torch.optim import Adam
 from torch.autograd import Variable
 from torchvision.transforms import transforms
 from torch.utils.data import Dataset, DataLoader
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
 import matplotlib.pyplot as plt
 from torchvision.utils import save_image
-from skimage.util import ran
-
+from skimage import io
+import cv2
 
 # Catout on the images
 class Cutout(object):
@@ -70,9 +67,9 @@ class TextImagesDataset(Dataset):
         """
         csv = re.compile(r"[a-zA-Z_]+\.csv")
         if csv.match(csv_file):
-            self.landmarks_frame = pd.read_csv(csv_file)
+            self.data_frame = pd.read_csv(csv_file)
         else: 
-            self.landmarks_frame = pd.read_excel(csv_file)
+            self.data_frame = pd.read_excel(csv_file)
         self.root_dir = root_dir
         self.transform = transform
         self.mode = mode
@@ -85,16 +82,19 @@ class TextImagesDataset(Dataset):
             idx = idx.tolist()
 
         img_name = os.path.join(self.root_dir,
-                                self.landmarks_frame.iloc[idx, 0])
-        image = io.imread(img_name)
-        landmarks = self.landmarks_frame.iloc[idx, 1:]
-        landmarks = np.array([landmarks], dtype=float).reshape(-1, 2)
-        sample = {'image': image, 'landmarks': landmarks}
+                                str(self.data_frame.iloc[idx, 0]) + ".tiff")
+        image = cv2.imread(img_name, cv2.IMREAD_GRAYSCALE)
+        image = cv2.bitwise_not(image)
 
         if self.transform:
-            sample = self.transform(sample)
+            image = self.transform(image)
 
-        return sample
+        if mode in ['train', 'valid']:
+            labels = self.data_frame.iloc[idx, 1]
+
+            return image, labels
+        
+        return image
 
 
 # Loading and normalizing the data.
@@ -106,16 +106,17 @@ transformations = transforms.Compose([
     transforms.Normalize((0.5,), (0.5,))
 ])
 
-train_transform = transforms.Compose([transforms.Resize((256)),
-                                      transforms.RandomCrop(224),
-                                      Cutout(n_holes=1, length=16),
+train_transform = transforms.Compose([transforms.ToPILImage(),
+                                      transforms.Resize((3000, 3000)),
+                                      transforms.RandomCrop((2999,2999)),
                                       transforms.ToTensor(),
-                                      transforms.Normalize((0.6959, 0.6537, 0.6371),(0.3113, 0.3192, 0.3214)),
+                                      Cutout(n_holes=50, length=50),
+                                      transforms.Normalize([0.5, ], [0.5, ]),
 ])
-test_transform = transforms.Compose([transforms.Resize((256)),
-                                     transforms.CenterCrop(224),
+test_transform = transforms.Compose([transforms.Resize((3000,300)),
+                                     transforms.CenterCrop(2999,299),
                                      transforms.ToTensor(),
-                                     transforms.Normalize((0.6959, 0.6537, 0.6371),(0.3113, 0.3192, 0.3214)),
+                                     transforms.Normalize([0.5, ], [0.5, ]),
 ])
  
 batch_size = 10
@@ -149,6 +150,7 @@ class CNN(nn.Module):
 
         return output
 
+model = CNN(2, number_of_labels)
 
 # Loss function with Classification Cross-Entropy loss and an optimizer with Adam optimizer
 loss_fn = nn.CrossEntropyLoss()
@@ -168,7 +170,7 @@ def testAccuracy():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     with torch.no_grad():
-        for data in test_loader:
+        for data in val_loader:
             images, labels = data
             # run the model on the test set to predict labels
             outputs = model(images.to(device))
@@ -186,7 +188,7 @@ def testClassess():
     class_correct = list(0. for i in range(number_of_labels))
     class_total = list(0. for i in range(number_of_labels))
     with torch.no_grad():
-        for data in test_loader:
+        for data in val_loader:
             images, labels = data
             outputs = model(images)
             _, predicted = torch.max(outputs, 1)
@@ -278,23 +280,21 @@ def testBatch():
 
 
 if __name__ == "__main__":
-    transformed_dataset = TextImagesDataset(csv_file='data/faces/face_landmarks.csv',
-                                           root_dir='data/faces/')
+    train_set = TextImagesDataset(csv_file='data/train-C3/train-c3-labels.xlsx', root_dir='data/train-C3/', transform=train_transform, "train")
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=3)
 
-    for i, sample in enumerate(transformed_dataset):
-        print(i, sample['image'].size(), sample['landmarks'].size())
+    val_set = = TextImagesDataset(csv_file='data/train-C3/val-c3-labels.xlsx', root_dir='data/val-C3/', transform=train_transform, "valid") 
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
+    
 
-    if i == 3:
-        break
-    '''
-    train(5)
+    train(50)
     print('Finished Training')
 
     # Test which classes performed well
     testAccuracy()
     
     # Let's load the model we just created and test the accuracy per label
-    model = CNN(2)
+    model = CNN(2, number_of_labels)
     path = "Model.pth"
     model.load_state_dict(torch.load(path))
 
@@ -302,4 +302,3 @@ if __name__ == "__main__":
     testBatch()
 
     testClassess()
-    '''
